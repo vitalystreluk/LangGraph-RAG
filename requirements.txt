@@ -1,0 +1,16 @@
+# RAG Agent dependencies (extends langchain-academy/requirements.txt)
+langgraph
+langchain-community
+langchain-core
+langchain-ollama
+langchain-chroma
+langchain-text-splitters
+langchain-tavily
+python-dotenv
+pypdf
+
+# For hybrid search (BM25 + Ensemble) and MultiQueryRetriever
+langchain>=0.3
+
+# Optional: for re-ranking (pip install flashrank)
+# flashrank
