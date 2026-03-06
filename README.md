@@ -1,6 +1,6 @@
 
 Обучающий пилот-проект при прохождении курса [LangChain Academy LangGraph 📸 ](assets/langchain_academy_course.png).
-RAG-подходы взяты из статьи: [Graph RAG — Habr](https://habr.com/ru/articles/1003064/)
+RAG-подходы отчасти взяты из статьи: [Graph RAG — Habr](https://habr.com/ru/articles/1003064/)
 
 
 -----
