@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "./agent.py:app",
+    "retrieval_subgraph": "./subgraphs/retrieval.py",
+    "generation_subgraph": "./subgraphs/generation.py"
+  },
+  "env": ".env"
+}

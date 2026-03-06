@@ -1,90 +1,166 @@
+"""
+Interactive CLI for the RAG agent.
+
+Phase 2 features:
+  - astream_events(version="v2") for token-level streaming
+  - Human-in-the-loop: detects when the graph is interrupted before web_search_confirm,
+    asks the user for permission, then resumes or skips the web search
+"""
 import asyncio
-import sys
-import os
+import logging
 
-# Add project root to path so we can import agent from anywhere
-RAG_AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(RAG_AGENT_DIR)
-sys.path.insert(0, PROJECT_ROOT)
+from rag_agent.agent import DEFAULT_CONFIG, app
 
-from rag_agent.agent import app, DEFAULT_CONFIG, FAST_MODE
+logger = logging.getLogger(__name__)
+
+EMPTY_INITIAL_STATE = {
+    "question": "",
+    "generation": "",
+    "documents": [],
+    "steps": [],
+    "loop_count": 0,
+    "relevance": "",
+}
 
 
-async def run_with_token_streaming(inputs: dict) -> str:
-    """Run the agent with token-level streaming via astream_events."""
-    final_generation = ""
+# ── Streaming helper ──────────────────────────────────────────────────────────
+
+async def stream_once(inputs, config: dict, suppress_nodes: set[str] | None = None) -> str:
+    """
+    Stream one invocation of the graph, printing node progress + tokens.
+    `suppress_nodes` — set of node names whose progress label should be hidden
+    (used when resuming after HITL to avoid printing stale labels).
+    Returns the last generation text seen, or "" if interrupted.
+    """
+    generation = ""
     last_node = None
+    suppress_nodes = suppress_nodes or set()
 
-    async for event in app.astream_events(inputs, config=DEFAULT_CONFIG, version="v1"):
+    async for event in app.astream_events(inputs, config=config, version="v2"):
         kind = event.get("event")
+
+        # Node start — print a progress label
         if kind == "on_chain_start":
-            meta = event.get("metadata", {})
-            node = meta.get("langgraph_node")
+            node = event.get("metadata", {}).get("langgraph_node")
             if node and node != last_node:
                 last_node = node
-                if node == "transform_query":
-                    print("🔄 Rephrasing your question...")
-                elif node == "grade_documents":
-                    print("📋 Checking document relevance...")
-                elif node == "web_search":
-                    print("🌐 Searching the web...")
-                elif node == "generate":
-                    print("\n💡 ANSWER:")
-        elif kind == "on_chat_model_stream":
-            data = event.get("data", {})
-            chunk = data.get("chunk", {})
-            if hasattr(chunk, "content") and chunk.content:
-                print(chunk.content, end="", flush=True)
-                final_generation += chunk.content
-            elif isinstance(chunk, dict) and chunk.get("content"):
-                c = chunk["content"]
-                print(c, end="", flush=True)
-                final_generation += c
+                label = {
+                    "retrieve":           "🔍 Retrieving documents...",
+                    "transform_query":    "🔄 Rephrasing question...",
+                    "web_search_confirm": "⏸  Paused — web search needed",
+                    "web_search":         "🌐 Searching the web...",
+                    "generate":           "\n💡 ANSWER:",
+                }.get(node)
+                if label and node not in suppress_nodes:
+                    print(label)
 
-    return final_generation
+        # Token stream — only from the answer-generation node, not graders/query-expanders
+        elif kind == "on_chat_model_stream":
+            node = event.get("metadata", {}).get("langgraph_node")
+            if node != "generate":
+                continue
+            chunk = event.get("data", {}).get("chunk")
+            if chunk is None:
+                continue
+            content = chunk.content if hasattr(chunk, "content") else chunk.get("content", "")
+            if content:
+                print(content, end="", flush=True)
+                generation += content
+
+    return generation
+
+
+# ── HITL helper ───────────────────────────────────────────────────────────────
+
+def ask_web_search_permission() -> bool:
+    """Ask the user whether to allow the web search fallback."""
+    print("\n" + "─" * 40)
+    print("⚠️  The local knowledge base didn't have a good answer.")
+    print("   The agent wants to search the web (Tavily).")
+    while True:
+        choice = input("   Allow web search? [y/n]: ").strip().lower()
+        if choice in ("y", "yes"):
+            return True
+        if choice in ("n", "no"):
+            return False
+        print("   Please enter y or n.")
+
+
+# ── Main REPL ─────────────────────────────────────────────────────────────────
+
+async def chat(user_input: str, config: dict) -> str:
+    """
+    Run one full question-answer cycle, handling HITL interrupts.
+
+    LangGraph interrupt flow:
+      1. stream_once() streams until the graph hits interrupt_before=["web_search_confirm"]
+      2. app.get_state() reveals pending next nodes
+      3. We ask the user; they can approve or skip the web search
+      4. Resume with app.invoke(None, config) or update state to bypass web search
+    """
+    inputs = {**EMPTY_INITIAL_STATE, "question": user_input}
+    generation = await stream_once(inputs, config)
+
+    # Check whether the graph is waiting at the HITL interrupt
+    graph_state = app.get_state(config)
+    while graph_state.next:
+        pending = list(graph_state.next)
+        if "web_search_confirm" in pending:
+            if ask_web_search_permission():
+                # Resume: suppress the web_search_confirm label (already shown before interrupt)
+                generation = await stream_once(None, config, suppress_nodes={"web_search_confirm"})
+            else:
+                # Skip web search: force relevance="yes" so decide_to_generate routes to generate
+                app.update_state(config, {"relevance": "yes", "steps": ["web_search_skipped"]})
+                generation = await stream_once(None, config, suppress_nodes={"web_search_confirm"})
+        else:
+            # Unexpected interrupt — just resume
+            generation = await stream_once(None, config)
+
+        graph_state = app.get_state(config)
+
+    # Fallback if streaming produced no tokens (e.g. Ollama didn't stream)
+    if not generation:
+        final = app.get_state(config).values
+        generation = final.get("generation", "")
+        if generation:
+            print("\n💡 ANSWER:")
+            print(generation)
+
+    return generation
 
 
 def main():
-    print("\n" + "=" * 50)
-    print("🎓 Welcome to your ML Research Assistant!")
-    print("Knowledge base: Andrew Ng's Supervised Machine Learning")
-    if FAST_MODE:
-        print("⚡ Fast mode (RAG_FAST_MODE=1): fewer checks, faster responses")
-    print("Type 'exit' or 'quit' to stop.")
-    print("=" * 50 + "\n")
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+
+    print("\n" + "=" * 52)
+    print("🎓  ML Research Assistant")
+    print("    Knowledge base: Andrew Ng's Supervised ML course")
+    print("    Type 'exit' or 'quit' to stop.")
+    print("=" * 52 + "\n")
 
     while True:
-        user_input = input("🤔 Your question: ")
+        try:
+            user_input = input("🤔 Your question: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nGoodbye!")
+            break
 
-        if user_input.lower() in ["exit", "quit"]:
+        if user_input.lower() in ("exit", "quit"):
             print("Goodbye! Happy learning! 👋")
             break
 
-        if not user_input.strip():
+        if not user_input:
             continue
 
-        print("\n🔍 Thinking...")
-
-        inputs = {"question": user_input}
-
+        print()
         try:
-            final_generation = asyncio.run(run_with_token_streaming(inputs))
-            if not final_generation:
-                # Fallback if no token stream (e.g. Ollama streaming not supported)
-                final_state = app.invoke(inputs, config=DEFAULT_CONFIG)
-                final_generation = final_state.get("generation", "")
-                print(final_generation)
-        except Exception as e:
-            print(f"\n⚠️ Streaming failed ({e}), falling back to sync...")
-            final_state = app.invoke(inputs, config=DEFAULT_CONFIG)
-            final_generation = final_state.get("generation", "")
-            if not final_generation:
-                print("(No response)")
-            else:
-                print("\n💡 ANSWER:")
-                print(final_generation)
+            asyncio.run(chat(user_input, DEFAULT_CONFIG))
+        except Exception as exc:
+            logger.exception("Error during chat: %s", exc)
+            print(f"\n⚠️  Error: {exc}")
 
-        print("\n" + "-" * 30 + "\n")
+        print("\n" + "─" * 30 + "\n")
 
 
 if __name__ == "__main__":

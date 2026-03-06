@@ -1,16 +1,29 @@
+"""
+Document ingestion pipeline.
+
+Loads PDFs and Jupyter notebooks from data/, splits them into chunks,
+embeds with Ollama nomic-embed-text, and stores in ChromaDB.
+Also saves chunks to chunks.pkl for the BM25 hybrid retriever in agent.py.
+"""
+import logging
 import os
 import pickle
 import re
-from langchain_community.document_loaders import PyPDFLoader, NotebookLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_ollama import OllamaEmbeddings
-from langchain_chroma import Chroma
+import shutil
 
-# Configuration
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")  # suppress ChromaDB posthog noise
+
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import NotebookLoader, PyPDFLoader
+from langchain_ollama import OllamaEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+logger = logging.getLogger(__name__)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CHROMA_PATH = os.path.join(BASE_DIR, "chroma_db")
-CHUNKS_PATH = os.path.join(BASE_DIR, "chunks.pkl")  # For BM25 hybrid search
+CHUNKS_PATH = os.path.join(BASE_DIR, "chunks.pkl")
 EMBEDDING_MODEL = "nomic-embed-text"
 
 
@@ -33,62 +46,64 @@ def enrich_metadata(doc, file_path: str):
 
 
 def load_documents():
+    if not os.path.isdir(DATA_DIR):
+        raise FileNotFoundError(f"Data directory not found: {DATA_DIR}")
+
     documents = []
-    for file in os.listdir(DATA_DIR):
+    for file in sorted(os.listdir(DATA_DIR)):
         file_path = os.path.join(DATA_DIR, file)
-        if file.endswith(".pdf"):
-            print(f"Loading PDF: {file}")
-            loader = PyPDFLoader(file_path)
-            docs = loader.load()
-            for d in docs:
-                enrich_metadata(d, file_path)
-            documents.extend(docs)
-        elif file.endswith(".ipynb"):
-            print(f"Loading Notebook: {file}")
-            loader = NotebookLoader(file_path, include_outputs=False, remove_newline=True)
-            docs = loader.load()
-            for d in docs:
-                enrich_metadata(d, file_path)
-            documents.extend(docs)
+        try:
+            if file.endswith(".pdf"):
+                logger.info("Loading PDF: %s", file)
+                docs = PyPDFLoader(file_path).load()
+                for d in docs:
+                    enrich_metadata(d, file_path)
+                documents.extend(docs)
+            elif file.endswith(".ipynb"):
+                logger.info("Loading notebook: %s", file)
+                docs = NotebookLoader(
+                    file_path, include_outputs=False, remove_newline=True
+                ).load()
+                for d in docs:
+                    enrich_metadata(d, file_path)
+                documents.extend(docs)
+        except Exception:
+            logger.exception("Failed to load %s — skipping", file)
+
     return documents
 
+
 def split_text(documents):
-    text_splitter = RecursiveCharacterTextSplitter(
+    splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
         add_start_index=True,
     )
-    return text_splitter.split_documents(documents)
+    return splitter.split_documents(documents)
+
 
 def main():
-    # 1. Load
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
     raw_docs = load_documents()
-    print(f"Loaded {len(raw_docs)} document pages/cells.")
+    logger.info("Loaded %d document pages/cells.", len(raw_docs))
 
-    # 2. Split
     chunks = split_text(raw_docs)
-    print(f"Split into {len(chunks)} chunks.")
+    logger.info("Split into %d chunks.", len(chunks))
 
-    # 3. Embed and Store
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-    
-    # Clean up existing DB if any
+    emb = OllamaEmbeddings(model=EMBEDDING_MODEL)
+
     if os.path.exists(CHROMA_PATH):
-        import shutil
         shutil.rmtree(CHROMA_PATH)
-        print("Cleaned up existing Chroma DB.")
+        logger.info("Removed existing Chroma DB.")
 
-    db = Chroma.from_documents(
-        chunks,
-        embeddings,
-        persist_directory=CHROMA_PATH
-    )
-    print(f"Saved {len(chunks)} chunks to {CHROMA_PATH}")
+    Chroma.from_documents(chunks, emb, persist_directory=CHROMA_PATH)
+    logger.info("Saved %d chunks to %s", len(chunks), CHROMA_PATH)
 
-    # Save chunks for BM25 hybrid search (in-memory index at agent startup)
     with open(CHUNKS_PATH, "wb") as f:
         pickle.dump(chunks, f)
-    print(f"Saved chunks to {CHUNKS_PATH} for BM25 retriever")
+    logger.info("Saved chunks to %s for BM25 retriever", CHUNKS_PATH)
+
 
 if __name__ == "__main__":
     main()
