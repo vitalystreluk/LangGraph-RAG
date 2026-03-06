@@ -1,9 +1,12 @@
 
 Обучающий пилот-проект при прохождении курса [LangChain Academy — Introduction to LangGraph](https://academy.langchain.com/courses/intro-to-langgraph).
-RAG-подходы взяты из статьи: [Graph RAG с точностью 96.7% — Habr](https://habr.com/ru/articles/1003064/)
+RAG-подходы взяты из статьи: [Graph RAG — Habr](https://habr.com/ru/articles/1003064/)
 
-![LangChain Academy LangGraph](assets/langchain_academy_course.png)
+[📸 Скриншот курса](assets/langchain_academy_course.png)
 
+
+
+-----
 # RAG Agent — Andrew Ng ML Course Assistant
 
 Agentic RAG system built with **LangGraph** and **LangChain** that answers questions about Andrew Ng's "Supervised Machine Learning" course. Showcases production-oriented RAG patterns and progressive LangGraph feature usage across two phases.
@@ -167,4 +170,4 @@ Type `n` to skip and get an answer from partial context.
 Slides and labs from Andrew Ng's Supervised Machine Learning course. Place PDFs and notebooks in `data/` before running `ingest`.
 
 ---
-*Last updated: 2026-03-06*
+*Last updated: 2026-03-04*
